@@ -1,0 +1,53 @@
+{
+  "entities": {
+    "AudioRecording": {
+      "title": "Audio Recording",
+      "description": "Metadata for a vocal recording session",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "url": { "type": "string" },
+        "transcription": { "type": "string" },
+        "translation": { "type": "string" },
+        "timestamps": { "type": "array", "items": { "type": "number" } },
+        "createdAt": { "type": "number" },
+        "duration": { "type": "number" },
+        "type": { "type": "string", "enum": ["audio", "video", "text"] },
+        "voiceEffect": { "type": "string" },
+        "folderId": { "type": "string" },
+        "effects": {
+          "type": "object",
+          "properties": {
+            "pitch": { "type": "number" },
+            "distortion": { "type": "number" },
+            "reverb": { "type": "number" }
+          }
+        },
+        "userId": { "type": "string" }
+      },
+      "required": ["id", "name", "url", "createdAt", "duration", "type", "userId"]
+    },
+    "Folder": {
+      "title": "Folder",
+      "description": "Organizational folder for recordings",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "userId": { "type": "string" }
+      },
+      "required": ["id", "name", "userId"]
+    }
+  },
+  "firestore": {
+    "users/{userId}/recordings/{recordingId}": {
+      "schema": "AudioRecording",
+      "description": "User's vocal recordings"
+    },
+    "users/{userId}/folders/{folderId}": {
+      "schema": "Folder",
+      "description": "User's organizational folders"
+    }
+  }
+}

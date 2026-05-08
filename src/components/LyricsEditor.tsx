@@ -12,14 +12,77 @@ interface LyricsEditorProps {
 
 export function LyricsEditor({ recording, onUpdate }: LyricsEditorProps) {
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [activeTab, setActiveTab ] = useState<'original' | 'translated' | 'bilingual'>('original');
   const [copied, setCopied] = useState(false);
   const [isPlayingTTS, setIsPlayingTTS] = useState(false);
   const [isPlayingOriginal, setIsPlayingOriginal] = useState(false);
   const [showVoiceSelector, setShowVoiceSelector] = useState(false);
+  const [pauseThreshold, setPauseThreshold] = useState(0.5);
+  const [gapThreshold, setGapThreshold] = useState(2.0);
   const [playingLineIndex, setPlayingLineIndex] = useState<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const lineRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+
+  React.useEffect(() => {
+    if (playingLineIndex !== null) {
+      const lineElement = lineRefs.current.get(playingLineIndex);
+      if (lineElement && scrollContainerRef.current) {
+        lineElement.scrollIntoView({
+          behavior: 'smooth',
+          block: 'center'
+        });
+      }
+    }
+  }, [playingLineIndex]);
+
+  React.useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || !isPlayingOriginal || !recording.timestamps || recording.timestamps.length === 0) {
+      return;
+    }
+
+    const handleTimeUpdate = () => {
+      const currentTime = audio.currentTime;
+      const timestamps = recording.timestamps || [];
+      
+      let foundIndex = 0;
+      for (let i = 0; i < timestamps.length; i++) {
+        // If current time is within this line's range
+        if (currentTime >= timestamps[i].startTime && currentTime <= timestamps[i].endTime) {
+          foundIndex = i;
+          break;
+        }
+        // Fallback: stay on the last line passed
+        if (currentTime >= timestamps[i].startTime) {
+          foundIndex = i;
+        }
+      }
+      setPlayingLineIndex(foundIndex);
+    };
+
+    audio.addEventListener('timeupdate', handleTimeUpdate);
+    return () => audio.removeEventListener('timeupdate', handleTimeUpdate);
+  }, [isPlayingOriginal, recording.timestamps]);
+
+  const silenceGaps = React.useMemo(() => {
+    if (!recording.timestamps || recording.timestamps.length < 2) return new Map<number, { duration: number, type: 'pause' | 'gap' }>();
+    const gaps = new Map<number, { duration: number, type: 'pause' | 'gap' }>();
+    for (let i = 0; i < recording.timestamps.length - 1; i++) {
+      const currentEnd = recording.timestamps[i].endTime;
+      const nextStart = recording.timestamps[i + 1].startTime;
+      const duration = nextStart - currentEnd;
+      
+      if (duration >= gapThreshold) {
+        gaps.set(i, { duration, type: 'gap' });
+      } else if (duration >= pauseThreshold) {
+        gaps.set(i, { duration, type: 'pause' });
+      }
+    }
+    return gaps;
+  }, [recording.timestamps, pauseThreshold, gapThreshold]);
 
   const selectedVoice = VOICES.find(v => v.id === recording.voiceEffect) || VOICES[0];
 
@@ -31,8 +94,8 @@ export function LyricsEditor({ recording, onUpdate }: LyricsEditorProps) {
     if (ttsAudioRef.current) {
       ttsAudioRef.current.pause();
       setIsPlayingTTS(false);
-      setPlayingLineIndex(null);
     }
+    setPlayingLineIndex(null);
   };
 
   const handleTranscribe = async () => {
@@ -44,8 +107,8 @@ export function LyricsEditor({ recording, onUpdate }: LyricsEditorProps) {
       
       reader.onloadend = async () => {
         const base64 = (reader.result as string).split(',')[1];
-        const lyrics = await transcribeAudio(base64);
-        onUpdate({ ...recording, transcription: lyrics });
+        const result = await transcribeAudio(base64);
+        onUpdate({ ...recording, transcription: result.lyrics, timestamps: result.timestamps });
       };
       reader.readAsDataURL(blob);
     } catch (err) {
@@ -128,6 +191,49 @@ export function LyricsEditor({ recording, onUpdate }: LyricsEditorProps) {
     window.open(`mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(text || '')}`);
   };
 
+  const handleExportAudio = async () => {
+    const text = activeTab === 'original' ? recording.transcription : recording.translation;
+    if (!text) return;
+
+    setIsExporting(true);
+    try {
+      const audioBase64 = await generateSpeech(text, selectedVoice.preset);
+      const byteCharacters = atob(audioBase64);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      const blob = new Blob([byteArray], { type: 'audio/mp3' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${recording.name}_vocal_ai.mp3`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleExportTxt = () => {
+    const text = activeTab === 'original' ? recording.transcription : recording.translation;
+    if (!text) return;
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${recording.name}_lyrics.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="flex flex-col h-full bg-[#0F0F15] rounded-[3rem] border border-white/5 overflow-hidden shadow-[inset_0_2px_10px_rgba(0,0,0,0.5)] bento-card perspective-1000">
       <div className="p-8 pb-4 flex items-center justify-between z-10">
@@ -137,7 +243,19 @@ export function LyricsEditor({ recording, onUpdate }: LyricsEditorProps) {
           </div>
           <div className="hidden sm:block">
             <h2 className="font-bold text-base text-white">{recording.name}</h2>
-            <p className="text-[10px] uppercase font-mono tracking-widest text-slate-500 font-black">Lyric Engine 3.0</p>
+            <div className="flex items-center gap-2">
+              <p className="text-[10px] uppercase font-mono tracking-widest text-slate-500 font-black">Lyric Engine 3.0</p>
+              {isPlayingOriginal && (
+                <motion.span 
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  className="flex items-center gap-1 bg-indigo-500/20 text-indigo-400 px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-tighter border border-indigo-500/30"
+                >
+                  <span className="w-1 h-1 bg-indigo-400 rounded-full animate-pulse" />
+                  Karaoke Sync Active
+                </motion.span>
+              )}
+            </div>
           </div>
         </div>
 
@@ -192,7 +310,10 @@ export function LyricsEditor({ recording, onUpdate }: LyricsEditorProps) {
       <div className="flex-1 relative p-8 mx-auto w-full max-w-4xl overflow-hidden">
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_0%,rgba(79,70,229,0.05),transparent_70%)]" />
         
-        <div className="h-full overflow-y-auto custom-scrollbar font-serif text-xl sm:text-2xl leading-relaxed text-slate-300 whitespace-pre-wrap py-10 px-6 bg-black/20 rounded-[2.5rem] inner-depth border border-white/5">
+        <div 
+          ref={scrollContainerRef}
+          className="h-full overflow-y-auto custom-scrollbar font-serif text-xl sm:text-2xl leading-relaxed text-slate-300 whitespace-pre-wrap py-10 px-6 bg-black/20 rounded-[2.5rem] inner-depth border border-white/5 scroll-smooth"
+        >
           {!recording.transcription && !isProcessing && (
             <div className="flex flex-col items-center justify-center h-full text-center space-y-6 opacity-30">
               <Sparkles className="w-16 h-16" />
@@ -232,21 +353,109 @@ export function LyricsEditor({ recording, onUpdate }: LyricsEditorProps) {
                 recording.transcription.split('\n').map((line, i) => {
                   const translatedLines = recording.translation?.split('\n') || [];
                   return (
-                    <div key={i} className={cn(
-                      "group transition-all p-4 rounded-[2rem] border border-transparent hover:bg-white/5 hover:border-white/5",
-                      playingLineIndex === i && "bg-indigo-600/10 border-indigo-500/20"
-                    )}>
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="flex-1">
-                          <p className="text-white font-bold leading-tight group-hover:text-indigo-300 transition-colors text-2xl">
-                            {line}
-                          </p>
-                          {translatedLines[i] && (
-                            <p className="text-indigo-400/60 text-lg mt-2 italic font-sans flex items-center gap-2">
-                              {translatedLines[i]}
+                    <React.Fragment key={i}>
+                      <div 
+                        ref={el => el ? lineRefs.current.set(i, el) : lineRefs.current.delete(i)}
+                        className={cn(
+                        "group transition-all p-4 rounded-[2rem] border border-transparent hover:bg-white/5 hover:border-white/5 relative",
+                        playingLineIndex === i && "bg-indigo-600/20 border-indigo-500/40 shadow-[0_0_30px_rgba(79,70,229,0.15)] scale-[1.02]"
+                      )}>
+                        {playingLineIndex === i && (
+                          <motion.div 
+                            layoutId="karaoke-glow"
+                            className="absolute inset-0 bg-indigo-500/5 blur-2xl rounded-[2rem] -z-10"
+                          />
+                        )}
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="flex-1">
+                            <p className={cn(
+                              "font-bold leading-tight transition-all duration-500 text-2xl",
+                              playingLineIndex === i ? "text-indigo-400 scale-[1.01] origin-left" : "text-white group-hover:text-indigo-300"
+                            )}>
+                              {line}
                             </p>
-                          )}
+                            {translatedLines[i] && (
+                              <p className={cn(
+                                "text-lg mt-2 italic font-sans flex items-center gap-2 transition-colors",
+                                playingLineIndex === i ? "text-indigo-300/80" : "text-indigo-400/60"
+                              )}>
+                                {translatedLines[i]}
+                              </p>
+                            )}
+                          </div>
+                          <button 
+                            onClick={() => handleTTS(line, i)}
+                            className={cn(
+                              "p-3 rounded-2xl transition-all depth-button group-hover:opacity-100",
+                              playingLineIndex === i ? "bg-indigo-600 text-white scale-110" : "bg-white/5 text-slate-500 hover:text-indigo-400 opacity-0"
+                            )}
+                          >
+                            <PlayCircle className={cn("w-5 h-5", playingLineIndex === i && "animate-pulse")} />
+                          </button>
                         </div>
+                      </div>
+
+                      {silenceGaps.has(i) && (
+                        <motion.div 
+                          initial={{ opacity: 0, scale: 0.95 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          className={cn(
+                            "flex items-center gap-4 py-2 px-8 mx-4 my-2 rounded-2xl group/silence transition-all",
+                            silenceGaps.get(i)?.type === 'gap' 
+                              ? "bg-black/40 border border-white/5 py-3" 
+                              : "bg-white/5 border border-transparent py-1 opacity-60 hover:opacity-100"
+                          )}
+                        >
+                          <div className="flex items-center gap-2 flex-1">
+                            <div className={cn(
+                              "w-1.5 h-1.5 rounded-full animate-pulse",
+                              silenceGaps.get(i)?.type === 'gap' ? "bg-indigo-500" : "bg-slate-600"
+                            )} />
+                            <span className="text-[10px] font-black uppercase tracking-widest text-slate-600">
+                              {silenceGaps.get(i)?.type === 'gap' ? "Long Silence" : "Brief Pause"}
+                            </span>
+                            <span className="px-2 py-0.5 bg-slate-800 text-slate-400 rounded-lg text-[9px] font-mono">
+                              {silenceGaps.get(i)?.duration.toFixed(1)}s
+                            </span>
+                          </div>
+                          <button 
+                            onClick={() => {
+                              if (audioRef.current) {
+                                audioRef.current.currentTime = recording.timestamps![i + 1].startTime;
+                              }
+                            }}
+                            className="bg-indigo-600/10 text-indigo-400 hover:bg-indigo-600 hover:text-white px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all opacity-0 group-hover/silence:opacity-100"
+                          >
+                            Jump to next line
+                          </button>
+                        </motion.div>
+                      )}
+                    </React.Fragment>
+                  );
+                })
+              ) : (
+                (activeTab === 'original' ? recording.transcription : (recording.translation || "Translation fragment incoming..."))
+                  .split('\n')
+                  .map((line, i) => (
+                    <React.Fragment key={i}>
+                      <div 
+                        ref={el => el ? lineRefs.current.set(i, el) : lineRefs.current.delete(i)}
+                        className={cn(
+                        "group flex items-center justify-between p-4 rounded-[2rem] border border-transparent hover:bg-white/5 hover:border-white/5 transition-all relative",
+                        playingLineIndex === i && "bg-indigo-600/20 border-indigo-500/40 shadow-[0_0_30px_rgba(79,70,229,0.15)] scale-[1.02]"
+                      )}>
+                        {playingLineIndex === i && (
+                          <motion.div 
+                            layoutId="karaoke-glow-single"
+                            className="absolute inset-0 bg-indigo-500/5 blur-2xl rounded-[2rem] -z-10"
+                          />
+                        )}
+                        <p className={cn(
+                          "transition-all duration-500 text-2xl flex-1 font-bold",
+                          playingLineIndex === i ? "text-indigo-400 scale-[1.01] origin-left" : (i % 2 === 0 ? "text-white" : "text-slate-400 italic")
+                        )}>
+                          {line}
+                        </p>
                         <button 
                           onClick={() => handleTTS(line, i)}
                           className={cn(
@@ -257,33 +466,43 @@ export function LyricsEditor({ recording, onUpdate }: LyricsEditorProps) {
                           <PlayCircle className={cn("w-5 h-5", playingLineIndex === i && "animate-pulse")} />
                         </button>
                       </div>
-                    </div>
-                  );
-                })
-              ) : (
-                (activeTab === 'original' ? recording.transcription : (recording.translation || "Translation fragment incoming..."))
-                  .split('\n')
-                  .map((line, i) => (
-                    <div key={i} className={cn(
-                      "group flex items-center justify-between p-4 rounded-[2rem] border border-transparent hover:bg-white/5 hover:border-white/5 transition-all",
-                      playingLineIndex === i && "bg-indigo-600/10 border-indigo-500/20"
-                    )}>
-                      <p className={cn(
-                        "transition-all duration-700 text-2xl flex-1",
-                        i % 2 === 0 ? "text-white" : "text-slate-400 italic"
-                      )}>
-                        {line}
-                      </p>
-                      <button 
-                        onClick={() => handleTTS(line, i)}
-                        className={cn(
-                          "p-3 rounded-2xl transition-all depth-button group-hover:opacity-100",
-                          playingLineIndex === i ? "bg-indigo-600 text-white scale-110" : "bg-white/5 text-slate-500 hover:text-indigo-400 opacity-0"
-                        )}
-                      >
-                        <PlayCircle className={cn("w-5 h-5", playingLineIndex === i && "animate-pulse")} />
-                      </button>
-                    </div>
+
+                      {silenceGaps.has(i) && (
+                        <motion.div 
+                          initial={{ opacity: 0, scale: 0.95 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          className={cn(
+                            "flex items-center gap-4 py-2 px-8 mx-4 my-2 rounded-2xl group/silence transition-all",
+                            silenceGaps.get(i)?.type === 'gap' 
+                              ? "bg-black/40 border border-white/5 py-3" 
+                              : "bg-white/5 border border-transparent py-1 opacity-60 hover:opacity-100"
+                          )}
+                        >
+                          <div className="flex items-center gap-2 flex-1">
+                            <div className={cn(
+                              "w-1.5 h-1.5 rounded-full animate-pulse",
+                              silenceGaps.get(i)?.type === 'gap' ? "bg-indigo-500" : "bg-slate-600"
+                            )} />
+                            <span className="text-[10px] font-black uppercase tracking-widest text-slate-600">
+                              {silenceGaps.get(i)?.type === 'gap' ? "Long Silence" : "Brief Pause"}
+                            </span>
+                            <span className="px-2 py-0.5 bg-slate-800 text-slate-400 rounded-lg text-[9px] font-mono">
+                              {silenceGaps.get(i)?.duration.toFixed(1)}s
+                            </span>
+                          </div>
+                          <button 
+                            onClick={() => {
+                              if (audioRef.current) {
+                                audioRef.current.currentTime = recording.timestamps![i + 1].startTime;
+                              }
+                            }}
+                            className="bg-indigo-600/10 text-indigo-400 hover:bg-indigo-600 hover:text-white px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all opacity-0 group-hover/silence:opacity-100"
+                          >
+                            Jump to next line
+                          </button>
+                        </motion.div>
+                      )}
+                    </React.Fragment>
                   ))
               )}
             </motion.div>
@@ -366,6 +585,35 @@ export function LyricsEditor({ recording, onUpdate }: LyricsEditorProps) {
                   {selectedVoice.name} ({selectedVoice.gender})
                 </span>
               </button>
+
+              <div className="flex flex-col gap-2 p-4 rounded-2xl bg-white/5 border border-white/5 depth-button">
+                <div className="flex items-center gap-4">
+                  <span className="text-[10px] font-black uppercase tracking-widest text-indigo-400/60 whitespace-nowrap min-w-[100px]">Pause Threshold</span>
+                  <input 
+                    type="range" 
+                    min="0.1" 
+                    max="2.0" 
+                    step="0.05" 
+                    value={pauseThreshold} 
+                    onChange={(e) => setPauseThreshold(parseFloat(e.target.value))}
+                    className="w-16 sm:w-24 accent-indigo-400 h-1 bg-white/10 rounded-lg appearance-none cursor-pointer"
+                  />
+                  <span className="text-[10px] font-mono text-indigo-400 w-8">{pauseThreshold.toFixed(2)}s</span>
+                </div>
+                <div className="flex items-center gap-4">
+                  <span className="text-[10px] font-black uppercase tracking-widest text-indigo-500 whitespace-nowrap min-w-[100px]">Gap Threshold</span>
+                  <input 
+                    type="range" 
+                    min="1.0" 
+                    max="10.0" 
+                    step="0.1" 
+                    value={gapThreshold} 
+                    onChange={(e) => setGapThreshold(parseFloat(e.target.value))}
+                    className="w-16 sm:w-24 accent-indigo-600 h-1 bg-white/10 rounded-lg appearance-none cursor-pointer"
+                  />
+                  <span className="text-[10px] font-mono text-indigo-500 w-8">{gapThreshold.toFixed(1)}s</span>
+                </div>
+              </div>
             </div>
             
             <div className="flex items-center gap-3">
@@ -383,9 +631,24 @@ export function LyricsEditor({ recording, onUpdate }: LyricsEditorProps) {
               >
                 <Mail className="w-4 h-4" />
               </button>
-              <button className="flex items-center gap-3 px-8 py-3 rounded-2xl bg-indigo-600 text-white font-black text-xs uppercase tracking-widest hover:bg-indigo-500 transition-all border border-indigo-400/20 shadow-xl shadow-indigo-600/10 depth-button">
+              <button 
+                onClick={handleExportTxt}
+                className="flex items-center gap-2 px-4 py-3 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/5 transition-all text-white/50 hover:text-white depth-button"
+              >
                 <Download className="w-4 h-4" />
-                Export .txt
+                <span className="text-[10px] font-black uppercase tracking-widest hidden sm:inline">Txt</span>
+              </button>
+              <button 
+                onClick={handleExportAudio}
+                disabled={isExporting}
+                className="flex items-center gap-3 px-8 py-3 rounded-2xl bg-indigo-600 text-white font-black text-xs uppercase tracking-widest hover:bg-indigo-500 transition-all border border-indigo-400/20 shadow-xl shadow-indigo-600/10 depth-button disabled:opacity-50"
+              >
+                {isExporting ? (
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <Download className="w-4 h-4" />
+                )}
+                {isExporting ? "Exporting..." : "Export MP3"}
               </button>
             </div>
           </div>

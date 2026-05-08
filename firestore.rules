@@ -1,0 +1,77 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // --- AudioRecording Validation ---
+    function isValidAudioRecording(data) {
+      return data.keys().hasAll(['id', 'name', 'url', 'createdAt', 'duration', 'type', 'userId'])
+        && data.id is string && data.id.size() <= 128
+        && data.name is string && data.name.size() <= 200
+        && data.url is string && data.url.size() <= 1000
+        && data.createdAt is number
+        && data.duration is number
+        && data.type in ['audio', 'video', 'text']
+        && data.userId == request.auth.uid
+        && (!('transcription' in data) || data.transcription is string)
+        && (!('translation' in data) || data.translation is string)
+        && (!('timestamps' in data) || data.timestamps is list)
+        && (!('voiceEffect' in data) || data.voiceEffect is string)
+        && (!('folderId' in data) || data.folderId is string);
+    }
+
+    // --- Folder Validation ---
+    function isValidFolder(data) {
+      return data.keys().hasAll(['id', 'name', 'userId'])
+        && data.keys().size() == 3
+        && data.id is string && data.id.size() <= 128
+        && data.name is string && data.name.size() <= 100
+        && data.userId == request.auth.uid;
+    }
+
+    // --- User Collections ---
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      
+      match /recordings/{recordingId} {
+        allow list: if isOwner(userId);
+        allow get: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidAudioRecording(request.resource.data) && isValidId(recordingId);
+        allow update: if isOwner(userId) && isValidAudioRecording(request.resource.data)
+          && (
+            // Action: Update metadata/transcription
+            request.resource.data.id == resource.data.id
+            && request.resource.data.userId == resource.data.userId
+            && request.resource.data.createdAt == resource.data.createdAt
+          );
+        allow delete: if isOwner(userId);
+      }
+
+      match /folders/{folderId} {
+        allow list: if isOwner(userId);
+        allow get: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidFolder(request.resource.data) && isValidId(folderId);
+        allow update: if isOwner(userId) && isValidFolder(request.resource.data)
+          && request.resource.data.id == resource.data.id
+          && request.resource.data.userId == resource.data.userId;
+        allow delete: if isOwner(userId);
+      }
+    }
+  }
+}

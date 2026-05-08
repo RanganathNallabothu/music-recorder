@@ -1,9 +1,16 @@
+export interface Timestamp {
+  startTime: number;
+  endTime: number;
+}
+
 export interface AudioRecording {
   id: string;
   name: string;
   url: string;
+  userId: string;
   transcription?: string;
   translation?: string;
+  timestamps?: Timestamp[];
   createdAt: number;
   duration: number;
   type: 'audio' | 'video' | 'text';
@@ -19,6 +26,7 @@ export interface AudioRecording {
 export interface Folder {
   id: string;
   name: string;
+  userId: string;
 }
 
 export interface VoiceOption {

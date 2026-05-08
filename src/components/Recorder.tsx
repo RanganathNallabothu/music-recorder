@@ -20,7 +20,76 @@ export function Recorder({ onSave }: RecorderProps) {
   const [showBackground, setShowBackground] = useState(false);
   const [bgMusic, setBgMusic] = useState<BackgroundTrack | null>(null);
   const [bgVolume, setBgVolume] = useState(0.5);
+  const [bgAudioBuffer, setBgAudioBuffer] = useState<AudioBuffer | null>(null);
+  const [bgPreviewPlaying, setBgPreviewPlaying] = useState<string | null>(null);
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const [isSuggesting, setIsSuggesting] = useState(false);
+
+  const togglePreview = (track: BackgroundTrack, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (bgPreviewPlaying === track.id) {
+      previewAudioRef.current?.pause();
+      setBgPreviewPlaying(null);
+    } else {
+      if (previewAudioRef.current) {
+        previewAudioRef.current.src = track.url;
+        previewAudioRef.current.volume = bgVolume;
+        previewAudioRef.current.play();
+        setBgPreviewPlaying(track.id);
+      }
+    }
+  };
+
+  useEffect(() => {
+    const audio = new Audio();
+    audio.loop = true;
+    audio.onpause = () => setBgPreviewPlaying(null);
+    previewAudioRef.current = audio;
+    return () => {
+      audio.pause();
+      audio.src = '';
+    };
+  }, []);
+
+  useEffect(() => {
+    if (previewAudioRef.current) {
+      previewAudioRef.current.volume = bgVolume;
+    }
+  }, [bgVolume]);
+
+  useEffect(() => {
+    const loadBgMusic = async () => {
+      if (!bgMusic) {
+        setBgAudioBuffer(null);
+        return;
+      }
+      try {
+        const AudioContextClass = (window.AudioContext || (window as any).webkitAudioContext);
+        const ctx = new AudioContextClass();
+        const response = await fetch(bgMusic.url);
+        const arrayBuffer = await response.arrayBuffer();
+        const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+        setBgAudioBuffer(audioBuffer);
+        await ctx.close();
+      } catch (err) {
+        console.error("Error pre-loading background music:", err);
+        setBgAudioBuffer(null);
+      }
+    };
+    loadBgMusic();
+  }, [bgMusic]);
+
+  const handleCustomBgUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const url = URL.createObjectURL(file);
+      setBgMusic({
+        id: 'custom-' + Date.now(),
+        name: file.name.split('.')[0],
+        url: url
+      });
+    }
+  };
   const [moodInput, setMoodInput] = useState('');
   const [effects, setEffects] = useState({
     pitch: 1.0,
@@ -56,33 +125,33 @@ export function Recorder({ onSave }: RecorderProps) {
   };
 
   const startRecording = async () => {
+    // Stop any preview playback
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause();
+      setBgPreviewPlaying(null);
+    }
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioContextRef.current = new AudioContext();
+      const AudioContextClass = (window.AudioContext || (window as any).webkitAudioContext);
+      audioContextRef.current = new AudioContextClass();
       const ctx = audioContextRef.current;
       
       const source = ctx.createMediaStreamSource(stream);
       const destination = ctx.createMediaStreamDestination();
       
       // Background Music Node
-      let bgSource: AudioBufferSourceNode | null = null;
       const bgGain = ctx.createGain();
       bgGain.gain.value = bgVolume;
 
-      if (bgMusic) {
-        try {
-          const response = await fetch(bgMusic.url);
-          const arrayBuffer = await response.arrayBuffer();
-          const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-          bgSource = ctx.createBufferSource();
-          bgSource.buffer = audioBuffer;
-          bgSource.loop = true;
-          bgSource.connect(bgGain);
-          bgGain.connect(destination);
-          bgSource.start();
-        } catch (err) {
-          console.error("Error loading background music:", err);
-        }
+      if (bgAudioBuffer) {
+        const bgSource = ctx.createBufferSource();
+        bgSource.buffer = bgAudioBuffer;
+        bgSource.loop = true;
+        bgSource.connect(bgGain);
+        bgGain.connect(destination);
+        bgGain.connect(ctx.destination); // Monitor BG music while recording
+        bgSource.start();
       }
 
       // Distortion Node
@@ -357,6 +426,12 @@ export function Recorder({ onSave }: RecorderProps) {
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+              <label className="flex flex-col items-center justify-center p-4 rounded-3xl border border-white/5 bg-white/5 text-slate-400 hover:bg-white/10 hover:border-white/10 transition-all cursor-pointer depth-button group">
+                <Music className="w-5 h-5 mb-2 group-hover:text-indigo-400 transition-colors" />
+                <span className="text-[10px] font-black uppercase tracking-widest text-center">Upload Custom</span>
+                <input type="file" accept="audio/*" className="hidden" onChange={handleCustomBgUpload} />
+              </label>
+              
               <button
                 onClick={() => setBgMusic(null)}
                 className={cn(
@@ -380,7 +455,15 @@ export function Recorder({ onSave }: RecorderProps) {
                       : "bg-white/5 border-white/5 text-slate-400 hover:bg-white/10"
                   )}
                 >
-                  <span className="text-xs font-black uppercase tracking-widest mb-1">{track.name}</span>
+                  <div className="flex items-center justify-between w-full mb-1">
+                    <span className="text-xs font-black uppercase tracking-widest">{track.name}</span>
+                    <button 
+                      onClick={(e) => togglePreview(track, e)}
+                      className="p-1 rounded-full bg-white/10 hover:bg-white/20 transition-all"
+                    >
+                      {bgPreviewPlaying === track.id ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+                    </button>
+                  </div>
                   <span className={cn(
                     "text-[9px] uppercase font-mono",
                     bgMusic?.id === track.id ? "text-indigo-200" : "text-slate-600"

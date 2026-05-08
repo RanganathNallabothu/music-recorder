@@ -4,99 +4,214 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Mic2,Library as LibraryIcon, Search, Settings, Music, Sparkles, Headphones } from 'lucide-react';
+import { Mic2,Library as LibraryIcon, Search, Settings, Music, Sparkles, Headphones, LogOut, LogIn } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Recorder } from './components/Recorder';
 import { Library } from './components/Library';
 import { LyricsEditor } from './components/LyricsEditor';
 import { AudioRecording, Folder } from './types';
 import { cn } from './lib/utils';
+import { auth, db, googleProvider, handleFirestoreError, OperationType } from './lib/firebase';
+import { 
+  signInWithPopup, 
+  onAuthStateChanged, 
+  signOut,
+  User 
+} from 'firebase/auth';
+import { 
+  collection, 
+  onSnapshot, 
+  doc, 
+  setDoc, 
+  deleteDoc, 
+  updateDoc 
+} from 'firebase/firestore';
 
 export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'studio' | 'library'>('studio');
   const [recordings, setRecordings] = useState<AudioRecording[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [selectedRecording, setSelectedRecording] = useState<AudioRecording | null>(null);
 
-  // Load from localStorage for now
+  // Auth Listener
   useEffect(() => {
-    const savedRecordings = localStorage.getItem('vocalist_recordings');
-    if (savedRecordings) {
-      setRecordings(JSON.parse(savedRecordings));
-    }
-    const savedFolders = localStorage.getItem('vocalist_folders');
-    if (savedFolders) {
-      setFolders(JSON.parse(savedFolders));
-    }
+    return onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setAuthLoading(false);
+    });
   }, []);
 
-  const saveRecording = (partial: Partial<AudioRecording>) => {
+  // Data Listeners
+  useEffect(() => {
+    if (!user) {
+      setRecordings([]);
+      setFolders([]);
+      return;
+    }
+
+    const recordingsPath = `users/${user.uid}/recordings`;
+    const unsubscribeRecordings = onSnapshot(collection(db, recordingsPath), 
+      (snapshot) => {
+        const data = snapshot.docs.map(d => d.data() as AudioRecording);
+        setRecordings(data.sort((a, b) => b.createdAt - a.createdAt));
+      },
+      (error) => handleFirestoreError(error, OperationType.GET, recordingsPath)
+    );
+
+    const foldersPath = `users/${user.uid}/folders`;
+    const unsubscribeFolders = onSnapshot(collection(db, foldersPath), 
+      (snapshot) => {
+        const data = snapshot.docs.map(d => d.data() as Folder);
+        setFolders(data);
+      },
+      (error) => handleFirestoreError(error, OperationType.GET, foldersPath)
+    );
+
+    return () => {
+      unsubscribeRecordings();
+      unsubscribeFolders();
+    };
+  }, [user]);
+
+  const login = () => signInWithPopup(auth, googleProvider);
+  const logout = () => signOut(auth);
+
+  const saveRecording = async (partial: Partial<AudioRecording>) => {
+    if (!user) return;
+    const id = Math.random().toString(36).substr(2, 9);
+    const recordingsPath = `users/${user.uid}/recordings`;
+    
     const newRecording: AudioRecording = {
-      id: Math.random().toString(36).substr(2, 9),
+      id,
       name: partial.name || 'Untitled',
       url: partial.url || '',
       duration: partial.duration || 0,
       createdAt: Date.now(),
       type: 'audio',
+      userId: user.uid,
       voiceEffect: partial.voiceEffect,
       ...partial
     };
 
-    const updated = [newRecording, ...recordings];
-    setRecordings(updated);
-    localStorage.setItem('vocalist_recordings', JSON.stringify(updated));
-    setSelectedRecording(newRecording);
-    setActiveTab('library');
-  };
-
-  const deleteRecording = (id: string) => {
-    const updated = recordings.filter(r => r.id !== id);
-    setRecordings(updated);
-    localStorage.setItem('vocalist_recordings', JSON.stringify(updated));
-    if (selectedRecording?.id === id) setSelectedRecording(null);
-  };
-
-  const updateRecording = (updated: AudioRecording) => {
-    const list = recordings.map(r => r.id === updated.id ? updated : r);
-    setRecordings(list);
-    localStorage.setItem('vocalist_recordings', JSON.stringify(list));
-    setSelectedRecording(updated);
-  };
-
-  const createFolder = (name: string) => {
-    const newFolder: Folder = {
-      id: Math.random().toString(36).substr(2, 9),
-      name: name
-    };
-    const updated = [...folders, newFolder];
-    setFolders(updated);
-    localStorage.setItem('vocalist_folders', JSON.stringify(updated));
-  };
-
-  const renameFolder = (id: string, name: string) => {
-    const updated = folders.map(f => f.id === id ? { ...f, name } : f);
-    setFolders(updated);
-    localStorage.setItem('vocalist_folders', JSON.stringify(updated));
-  };
-
-  const deleteFolder = (id: string) => {
-    const updated = folders.filter(f => f.id !== id);
-    setFolders(updated);
-    localStorage.setItem('vocalist_folders', JSON.stringify(updated));
-    // Orphan recordings in that folder
-    const updatedRecordings = recordings.map(r => r.folderId === id ? { ...r, folderId: undefined } : r);
-    setRecordings(updatedRecordings);
-    localStorage.setItem('vocalist_recordings', JSON.stringify(updatedRecordings));
-  };
-
-  const moveRecordingToFolder = (recordingId: string, folderId: string | undefined) => {
-    const updated = recordings.map(r => r.id === recordingId ? { ...r, folderId } : r);
-    setRecordings(updated);
-    localStorage.setItem('vocalist_recordings', JSON.stringify(updated));
-    if (selectedRecording?.id === recordingId) {
-      setSelectedRecording({ ...selectedRecording, folderId });
+    try {
+      await setDoc(doc(db, recordingsPath, id), newRecording);
+      setSelectedRecording(newRecording);
+      setActiveTab('library');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, recordingsPath);
     }
   };
+
+  const deleteRecording = async (id: string) => {
+    if (!user) return;
+    const path = `users/${user.uid}/recordings`;
+    try {
+      await deleteDoc(doc(db, path, id));
+      if (selectedRecording?.id === id) setSelectedRecording(null);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, path);
+    }
+  };
+
+  const updateRecording = async (updated: AudioRecording) => {
+    if (!user) return;
+    const path = `users/${user.uid}/recordings`;
+    try {
+      await setDoc(doc(db, path, updated.id), updated);
+      setSelectedRecording(updated);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  };
+
+  const createFolder = async (name: string) => {
+    if (!user) return;
+    const id = Math.random().toString(36).substr(2, 9);
+    const path = `users/${user.uid}/folders`;
+    const newFolder: Folder = {
+      id,
+      name,
+      userId: user.uid
+    };
+    try {
+      await setDoc(doc(db, path, id), newFolder);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
+  };
+
+  const renameFolder = async (id: string, name: string) => {
+    if (!user) return;
+    const path = `users/${user.uid}/folders`;
+    try {
+      await updateDoc(doc(db, path, id), { name });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  };
+
+  const deleteFolder = async (id: string) => {
+    if (!user) return;
+    const path = `users/${user.uid}/folders`;
+    try {
+      await deleteDoc(doc(db, path, id));
+      // Orphan recordings in that folder - in production we might use a background function or batch
+      const affectedRecordings = recordings.filter(r => r.folderId === id);
+      const recPath = `users/${user.uid}/recordings`;
+      for (const r of affectedRecordings) {
+        await updateDoc(doc(db, recPath, r.id), { folderId: null });
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, path);
+    }
+  };
+
+  const moveRecordingToFolder = async (recordingId: string, folderId: string | undefined) => {
+    if (!user) return;
+    const path = `users/${user.uid}/recordings`;
+    try {
+      await updateDoc(doc(db, path, recordingId), { folderId: folderId || null });
+      if (selectedRecording?.id === recordingId) {
+        setSelectedRecording({ ...selectedRecording, folderId });
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  };
+
+  if (authLoading) {
+    return (
+      <div className="h-screen w-full bg-bento-bg flex items-center justify-center">
+        <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="h-screen w-full bg-bento-bg flex flex-col items-center justify-center p-8 gap-8 overflow-hidden relative">
+        <div className="absolute top-0 left-0 w-full h-full bg-[radial-gradient(circle_at_50%_40%,rgba(79,70,229,0.15),transparent_60%)]" />
+        <div className="z-10 text-center space-y-4">
+          <div className="p-6 bg-indigo-600 rounded-[3rem] shadow-2xl shadow-indigo-500/20 inline-block mb-4 bento-card">
+            <Mic2 className="w-16 h-16 text-white" />
+          </div>
+          <h1 className="text-5xl font-black text-white tracking-tighter">VOCALIST AI</h1>
+          <p className="text-slate-400 font-serif italic text-lg max-w-md mx-auto">
+            Your studio-grade AI vocal bridge. Record, translate, and sync with professional precision.
+          </p>
+        </div>
+        <button 
+          onClick={login}
+          className="z-10 flex items-center gap-4 px-10 py-5 bg-white text-black rounded-3xl font-black uppercase tracking-widest hover:scale-105 transition-all shadow-2xl depth-button"
+        >
+          <LogIn className="w-6 h-6" />
+          Authorize with Google
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen w-full bg-bento-bg text-slate-200 font-sans p-5 gap-5 overflow-hidden selection:bg-indigo-500/30 perspective-1000">
@@ -118,8 +233,8 @@ export default function App() {
           >
             <LibraryIcon className="w-7 h-7" />
           </button>
-          <button className="text-slate-400 hover:text-white transition-all depth-button p-3 rounded-2xl">
-            <Settings className="w-7 h-7" />
+          <button onClick={logout} className="text-slate-400 hover:text-red-400 transition-all depth-button p-3 rounded-2xl" title="Logout">
+            <LogOut className="w-7 h-7" />
           </button>
         </nav>
       </aside>
