@@ -1,0 +1,12 @@
+{
+  "name": "Vocalist - AI Audio Studio",
+  "description": "Convert songs to text, translate lyrics, record audio with audio effects, and manage your audio library with AI-powered transcription.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "Audio Processing",
+    "Multilingual Support",
+    "AI Transcription"
+  ]
+}
